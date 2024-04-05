@@ -1,0 +1,6 @@
+FROM python:3.10-alpine3.18
+RUN apk add --no-cache build-base postgresql-dev
+WORKDIR /app
+COPY ./backend ./
+RUN pip3 install -r requirements.txt
+

@@ -1,0 +1,98 @@
+.docker_scripts: &docker_scripts
+  before_script:
+    - docker login $CI_REGISTRY -u $CI_REGISTRY_USER -p $CI_REGISTRY_PWD
+  after_script:
+    - docker logout 
+
+.base_builds: &base_builds
+  stage: build
+  script:
+    - > 
+      docker build
+      --push
+      --progress plain
+      --tag ${CI_REGISTRY_IMAGE}:${TARGET_SERVICE}_${CI_COMMIT_REF_SLUG}_${CI_COMMIT_SHA}
+      -f Dockerfile.${TARGET_SERVICE}
+      ./
+
+.base_release: &base_release
+  stage: release
+  script:
+    - docker pull ${CI_REGISTRY_IMAGE}:${TARGET_SERVICE}_${CI_COMMIT_REF_SLUG}_${CI_COMMIT_SHA}
+    - > 
+      docker tag 
+      ${CI_REGISTRY_IMAGE}:${TARGET_SERVICE}_${CI_COMMIT_REF_SLUG}_${CI_COMMIT_SHA}
+      ${CI_REGISTRY_IMAGE}:${TARGET_SERVICE}-latest
+    - docker push ${CI_REGISTRY_IMAGE}:${TARGET_SERVICE}-latest
+
+default:
+  image: docker:25.0.5
+  tags:
+    - docker
+
+stages:
+  - build
+  - release
+  - migrate
+  - deploy
+
+build_backend:
+  <<: *docker_scripts
+  <<: *base_builds
+  variables:
+    TARGET_SERVICE: backend
+
+build_frontend:
+  <<: *docker_scripts
+  <<: *base_builds
+  variables:
+    TARGET_SERVICE: frontend
+
+release_backend:
+  <<: *docker_scripts
+  <<: *base_release
+  needs: 
+    - job: build_backend
+  variables:
+    TARGET_SERVICE: backend
+
+release_frontend:
+  <<: *docker_scripts
+  <<: *base_release
+  needs: 
+    - job: build_frontend
+  variables:
+    TARGET_SERVICE: frontend
+
+
+migrate:
+  stage: migrate
+  image: dtzar/helm-kubectl:3.13.3
+  tags:
+    - tenders
+  needs:
+    - release_backend
+  script:
+    - kubectl config use-context artw/tenders/x5-lot-37:gla-lot-37
+    - kubectl apply -f ./.kube/ns.yml # Создаем Namespace x5-lot37
+    - kubectl apply -f ./.kube/config_map.yml # Передаем переменные 
+    - kubectl apply -f ./.kube/registry.yml   
+    - kubectl apply -f ./.kube/postgres.yml # Запускаем Service, PostrgreSQL
+    - kubectl apply -f ./.kube/colstatic.yml   
+    - kubectl apply -f ./.kube/migrate.yml # Запускаем  миграцию 
+ 
+deploy:
+  stage: deploy
+  image: dtzar/helm-kubectl:3.13.3
+  tags:
+    - tenders
+  needs:
+    - migrate
+    - release_frontend
+  script:
+    - kubectl config use-context artw/tenders/x5-lot-37:gla-lot-37
+    - kubectl apply -f ./.kube/ingress.yml # Запускаем Ingress controller
+    - kubectl apply -f ./.kube/django.yml # Запускаем backend
+    - kubectl apply -f ./.kube/frontend.yml # Запускаем frontend
+    - kubectl rollout restart deployment/frontend-deploy -n x5-lot37
+    - kubectl rollout restart deployment/django-deploy -n x5-lot37
